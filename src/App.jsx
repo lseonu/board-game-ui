@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { FaCog } from "react-icons/fa";
+import { FaCog, FaTimes } from "react-icons/fa";
 import Webcam from "react-webcam";
 import {
   Container,
@@ -13,6 +13,8 @@ import {
   Switch,
   Slider,
 } from "@radix-ui/themes";
+import { detectCard, initializeDetection, listCameras } from './cardDetection';
+import { controlCardReader } from './cardReader';
 
 const App = () => {
   const [showNotification, setShowNotification] = useState(false);
@@ -28,6 +30,12 @@ const App = () => {
   
   const webcamRef = useRef(null);
   const [isWebcamActive, setIsWebcamActive] = useState(true);
+  const [isReading, setIsReading] = useState(false);
+  const [detectedCard, setDetectedCard] = useState(null);
+  const [cameras, setCameras] = useState([]);
+  const [selectedMainCamera, setSelectedMainCamera] = useState(null);
+  const [selectedCardCamera, setSelectedCardCamera] = useState(null);
+  const [isCameraSetupComplete, setIsCameraSetupComplete] = useState(false);
 
   const handleNotification = useCallback((message) => {
     setNotificationMessage(message);
@@ -35,9 +43,41 @@ const App = () => {
     setTimeout(() => setShowNotification(false), 10000);
   }, []);
 
-  const handleDrawCard = useCallback(() => {
-    handleNotification("New card drawn!");
-  }, [handleNotification]);
+  const handleDrawCard = async () => {
+    try {
+      setIsReading(true);
+      
+      // 1. Activate card reader
+      await controlCardReader.drawCard();
+      
+      // 2. Wait briefly for card to be positioned
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // 3. Capture and analyze image from webcam
+      const cardInfo = await detectCard();
+      
+      // 4. Update notification with detected card
+      setDetectedCard(cardInfo);
+      setNotificationMessage(`Drew card: ${cardInfo.name}`);
+      setShowNotification(true);
+      
+      // 5. Send to server
+      await fetch('/api/game/drawCard', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ card: cardInfo })
+      });
+
+    } catch (error) {
+      console.error('Error drawing card:', error);
+      setNotificationMessage('Error drawing card. Please try again.');
+      setShowNotification(true);
+    } finally {
+      setIsReading(false);
+    }
+  };
 
   const handleMove = useCallback(() => {
     handleNotification("Piece moved!");
@@ -55,6 +95,46 @@ const App = () => {
     height: 720,
     facingMode: "environment" // This will prefer the back camera if available
   };
+
+  // Initialize cameras on component mount
+  useEffect(() => {
+    const setupCameras = async () => {
+      try {
+        const availableCameras = await listCameras();
+        setCameras(availableCameras);
+        
+        // If we have at least two cameras, auto-select them
+        if (availableCameras.length >= 2) {
+          setSelectedMainCamera(availableCameras[0].deviceId);
+          setSelectedCardCamera(availableCameras[1].deviceId);
+        }
+      } catch (error) {
+        console.error('Error listing cameras:', error);
+        setNotificationMessage('Error setting up cameras');
+        setShowNotification(true);
+      }
+    };
+
+    setupCameras();
+  }, []);
+
+  // Initialize detection when cameras are selected
+  useEffect(() => {
+    const initDetection = async () => {
+      if (selectedMainCamera && selectedCardCamera) {
+        try {
+          await initializeDetection(selectedMainCamera, selectedCardCamera);
+          setIsCameraSetupComplete(true);
+        } catch (error) {
+          console.error('Error initializing detection:', error);
+          setNotificationMessage('Error initializing cameras');
+          setShowNotification(true);
+        }
+      }
+    };
+
+    initDetection();
+  }, [selectedMainCamera, selectedCardCamera]);
 
   // Apply dark theme
   useEffect(() => {
@@ -203,37 +283,143 @@ const App = () => {
     };
   };
 
+  // Add camera selector to the main render
+  const renderCameraSelector = () => {
+    if (cameras.length < 2) {
+      return (
+        <div style={{ 
+          position: 'fixed', 
+          top: '50%', 
+          left: '50%', 
+          transform: 'translate(-50%, -50%)',
+          backgroundColor: settings.darkTheme ? '#2d2d2d' : '#ffffff',
+          padding: '32px 48px',
+          borderRadius: '12px',
+          boxShadow: '0 4px 20px rgba(0, 0, 0, 0.15)',
+          zIndex: 1000,
+          textAlign: 'center',
+          maxWidth: '80%',
+          width: '400px'
+        }}>
+          <Text size="8" style={{ // Increased from size="5" to size="8"
+            color: '#be185d',
+            fontWeight: '500',
+            lineHeight: '1.5',
+            fontSize: '2rem' // Added explicit font size
+          }}>
+            Please connect at least two cameras to use the card detection feature.
+          </Text>
+        </div>
+      );
+    }
+
+    return (
+      <Dialog.Root>
+        <Dialog.Trigger>
+          <Button 
+            variant="soft" 
+            color="gray"
+            style={{ position: 'fixed', bottom: '20px', right: '20px' }}
+          >
+            Configure Cameras
+          </Button>
+        </Dialog.Trigger>
+        <Dialog.Content>
+          <Dialog.Title>Camera Configuration</Dialog.Title>
+          
+          <Flex direction="column" gap="4">
+            <Box>
+              <Text size="4">Main Camera</Text>
+              <select 
+                value={selectedMainCamera || ''} 
+                onChange={(e) => setSelectedMainCamera(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '8px',
+                  marginTop: '8px'
+                }}
+              >
+                <option value="">Select main camera</option>
+                {cameras.map(camera => (
+                  <option key={camera.deviceId} value={camera.deviceId}>
+                    {camera.label || `Camera ${camera.deviceId.slice(0, 8)}`}
+                  </option>
+                ))}
+              </select>
+            </Box>
+
+            <Box>
+              <Text size="4">Card Detection Camera</Text>
+              <select 
+                value={selectedCardCamera || ''} 
+                onChange={(e) => setSelectedCardCamera(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '8px',
+                  marginTop: '8px'
+                }}
+              >
+                <option value="">Select card detection camera</option>
+                {cameras.map(camera => (
+                  <option key={camera.deviceId} value={camera.deviceId}>
+                    {camera.label || `Camera ${camera.deviceId.slice(0, 8)}`}
+                  </option>
+                ))}
+              </select>
+            </Box>
+          </Flex>
+
+          <Dialog.Close>
+            <Button variant="soft" color="gray" style={{ marginTop: '20px' }}>
+              Close
+            </Button>
+          </Dialog.Close>
+        </Dialog.Content>
+      </Dialog.Root>
+    );
+  };
+
   return (
     <Box className="h-screen flex flex-col overflow-hidden" style={getAppStyles()}>
-      {/* Top Bar - Removed pink background */}
+      {/* Removed the top margin div */}
+      
       <Box 
         className="py-1" 
         style={{ 
-          marginTop: '40px',
-          backgroundColor: settings.darkTheme ? '#2d1a1a' : 'transparent'
+          backgroundColor: settings.darkTheme ? '#2d1a1a' : '#fce7f3',
+          height: '48px',
+          marginBottom: '24px'
         }}
-      >
-        <Container size="4">
-          <Flex justify="between" align="center">
-            <Heading 
-              as="h1" 
-              size="6" 
-              className="text-3xl"
-              style={{ color: settings.darkTheme ? '#ffffff' : '#1a1a1a' }}
-            >
-              Current Board Game Status
-            </Heading>
+      />
+
+      <Container size="4">
+        <Flex justify="between" align="center">
+          <Heading 
+            as="h1" 
+            size="6" 
+            className="text-3xl"
+            style={{ 
+              color: settings.darkTheme ? '#ffffff' : '#1a1a1a',
+              marginLeft: '24px'
+            }}
+          >
+            Current Board Game Status
+          </Heading>
+          <div style={{ marginRight: '24px' }}>
             <Dialog.Root open={showSettings} onOpenChange={setShowSettings}>
               <Dialog.Trigger>
                 <Button 
-                  variant="soft" 
-                  className="hover:bg-gray-200" 
+                  variant="ghost"
+                  className="hover:opacity-70"
                   aria-label="Settings"
                   style={{
-                    backgroundColor: settings.darkTheme ? '#2d2d2d' : '#f0f0f0'
+                    background: 'none',
+                    border: 'none',
+                    padding: '8px',
+                    color: '#be185d'
                   }}
                 >
-                  <FaCog size={20} />
+                  <FaCog size={32} />
                 </Button>
               </Dialog.Trigger>
               <Dialog.Content style={{ maxWidth: '500px', padding: '32px' }}>
@@ -344,9 +530,9 @@ const App = () => {
                 </div>
               </Dialog.Content>
             </Dialog.Root>
-          </Flex>
-        </Container>
-      </Box>
+          </div>
+        </Flex>
+      </Container>
 
       {/* Main Content */}
       <div className="flex flex-col items-center justify-center flex-grow">
@@ -399,7 +585,7 @@ const App = () => {
 
         {/* Game Controls with larger buttons */}
         <div className="mb-16">
-          <Flex gap="8" justify="center" className="h-36">
+          <Flex gap="8" justify="center" className="h-36" style={{ marginBottom: '24px' }}>
             <Button 
               size="4"
               variant="solid"
@@ -422,22 +608,85 @@ const App = () => {
         </div>
       </div>
 
-      {/* Notification */}
+      {/* Centered Popup Notification using Flex */}
       {showNotification && (
-        <Box 
-          role="alert"
-          aria-live="polite"
-          className="fixed top-12 right-4"
+        <div 
           style={{
-            backgroundColor: settings.darkTheme ? '#2d2d2d' : '#ffffff',
-            color: settings.darkTheme ? '#ffffff' : '#000000'
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            zIndex: 1000,
+            backgroundColor: 'rgba(0, 0, 0, 0.1)'
           }}
         >
-          <Card size="2" variant="surface">
-            <Text>{notificationMessage}</Text>
-          </Card>
-        </Box>
+          <Box 
+            role="alert"
+            aria-live="polite"
+            style={{
+              backgroundColor: settings.darkTheme ? '#2d2d2d' : '#ffffff',
+              color: settings.darkTheme ? '#ffffff' : '#000000',
+              fontSize: '2rem',
+              padding: '20px 40px',
+              borderRadius: '12px',
+              boxShadow: '0 4px 20px rgba(0, 0, 0, 0.15)',
+              animation: 'fadeInScale 0.3s ease-out',
+              position: 'relative'
+            }}
+          >
+            <button
+              onClick={() => setShowNotification(false)}
+              style={{
+                position: 'absolute',
+                top: '10px',
+                right: '10px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                padding: '5px',
+                color: settings.darkTheme ? '#ffffff80' : '#00000080',
+                transition: 'color 0.2s ease'
+              }}
+              onMouseOver={(e) => e.currentTarget.style.color = settings.darkTheme ? '#ffffff' : '#000000'}
+              onMouseOut={(e) => e.currentTarget.style.color = settings.darkTheme ? '#ffffff80' : '#00000080'}
+              aria-label="Close notification"
+            >
+              <FaTimes size={24} />
+            </button>
+
+            <div style={{
+              minWidth: '300px',
+              textAlign: 'center'
+            }}>
+              <Text style={{ 
+                fontSize: '2rem',
+                fontWeight: '500'
+              }}>
+                {notificationMessage}
+              </Text>
+            </div>
+          </Box>
+        </div>
       )}
+
+      {renderCameraSelector()}
+
+      <style jsx global>{`
+        @keyframes fadeInScale {
+          from {
+            opacity: 0;
+            transform: scale(0.95);
+          }
+          to {
+            opacity: 1;
+            transform: scale(1);
+          }
+        }
+      `}</style>
     </Box>
   );
 };
