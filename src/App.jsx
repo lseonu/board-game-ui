@@ -13,7 +13,7 @@ import {
   Switch,
   Slider,
 } from "@radix-ui/themes";
-import { detectCard, initializeDetection, listCameras } from './cardDetection';
+import { detectCard, initializeDetection, listCameras, getDebugData } from './cardDetection';
 import { controlCardReader } from './cardReader';
 
 const App = () => {
@@ -33,9 +33,33 @@ const App = () => {
   const [isReading, setIsReading] = useState(false);
   const [detectedCard, setDetectedCard] = useState(null);
   const [cameras, setCameras] = useState([]);
-  const [selectedMainCamera, setSelectedMainCamera] = useState(null);
-  const [selectedCardCamera, setSelectedCardCamera] = useState(null);
+  const [selectedMainCamera, setSelectedMainCamera] = useState(() => {
+    return localStorage.getItem('selectedMainCamera') || null;
+  });
+  const [selectedCardCamera, setSelectedCardCamera] = useState(() => {
+    return localStorage.getItem('selectedCardCamera') || null;
+  });
   const [isCameraSetupComplete, setIsCameraSetupComplete] = useState(false);
+
+  // Add state for pending camera selections
+  const [pendingMainCamera, setPendingMainCamera] = useState(selectedMainCamera);
+  const [pendingCardCamera, setPendingCardCamera] = useState(selectedCardCamera);
+
+  // Add state for dialog visibility
+  const [isConfigOpen, setIsConfigOpen] = useState(false);
+
+  // Add state for webcam constraints
+  const [videoConstraints, setVideoConstraints] = useState({
+    width: 1280,
+    height: 720,
+    facingMode: "environment"
+  });
+
+  // Add debug state
+  const [debugInfo, setDebugInfo] = useState(null);
+
+  // Add state for debug panel visibility
+  const [showDebugPanel, setShowDebugPanel] = useState(true);
 
   const handleNotification = useCallback((message) => {
     setNotificationMessage(message);
@@ -46,34 +70,32 @@ const App = () => {
   const handleDrawCard = async () => {
     try {
       setIsReading(true);
+      console.log('Starting card draw process...'); // Debug log
       
-      // 1. Activate card reader
+      await controlCardReader.connect();
       await controlCardReader.drawCard();
       
-      // 2. Wait briefly for card to be positioned
       await new Promise(resolve => setTimeout(resolve, 1000));
       
-      // 3. Capture and analyze image from webcam
+      if (!isCameraSetupComplete) {
+        throw new Error('Cameras not properly configured');
+      }
       const cardInfo = await detectCard();
       
-      // 4. Update notification with detected card
+      // Update debug info and log it
+      const debugData = getDebugData();
+      console.log('Debug Data:', debugData); // Make sure this shows data
+      setDebugInfo(debugData);
+      
       setDetectedCard(cardInfo);
       setNotificationMessage(`Drew card: ${cardInfo.name}`);
       setShowNotification(true);
-      
-      // 5. Send to server
-      await fetch('/api/game/drawCard', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ card: cardInfo })
-      });
 
     } catch (error) {
       console.error('Error drawing card:', error);
-      setNotificationMessage('Error drawing card. Please try again.');
+      setNotificationMessage('Error drawing card: ' + error.message);
       setShowNotification(true);
+      setDebugInfo({ error: error.message });
     } finally {
       setIsReading(false);
     }
@@ -90,12 +112,6 @@ const App = () => {
     }));
   };
 
-  const videoConstraints = {
-    width: 1280,
-    height: 720,
-    facingMode: "environment" // This will prefer the back camera if available
-  };
-
   // Initialize cameras on component mount
   useEffect(() => {
     const setupCameras = async () => {
@@ -103,10 +119,10 @@ const App = () => {
         const availableCameras = await listCameras();
         setCameras(availableCameras);
         
-        // If we have at least two cameras, auto-select them
-        if (availableCameras.length >= 2) {
-          setSelectedMainCamera(availableCameras[0].deviceId);
-          setSelectedCardCamera(availableCameras[1].deviceId);
+        // Only auto-select if no cameras are already selected in localStorage
+        if (availableCameras.length >= 2 && !selectedMainCamera && !selectedCardCamera) {
+          handleMainCameraChange(availableCameras[0].deviceId);
+          handleCardCameraChange(availableCameras[1].deviceId);
         }
       } catch (error) {
         console.error('Error listing cameras:', error);
@@ -283,7 +299,58 @@ const App = () => {
     };
   };
 
-  // Add camera selector to the main render
+  // Update the handleSaveCameraConfig function
+  const handleSaveCameraConfig = async () => {
+    // Save the pending selections
+    setSelectedMainCamera(pendingMainCamera);
+    setSelectedCardCamera(pendingCardCamera);
+    
+    localStorage.setItem('selectedMainCamera', pendingMainCamera);
+    localStorage.setItem('selectedCardCamera', pendingCardCamera);
+
+    // Update video constraints for the main camera
+    setVideoConstraints(prev => ({
+      ...prev,
+      deviceId: pendingMainCamera ? { exact: pendingMainCamera } : undefined
+    }));
+
+    // Reinitialize detection with new cameras
+    try {
+      await initializeDetection(pendingMainCamera, pendingCardCamera);
+      
+      // Force webcam refresh by briefly toggling it off and on
+      setIsWebcamActive(false);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      setIsWebcamActive(true);
+      
+      setNotificationMessage('Camera configuration saved successfully');
+      setShowNotification(true);
+    } catch (error) {
+      console.error('Error initializing cameras:', error);
+      setNotificationMessage('Error setting up cameras');
+      setShowNotification(true);
+    }
+
+    setIsConfigOpen(false);
+  };
+
+  // Handle dialog open
+  const handleConfigOpen = () => {
+    // Reset pending selections to current values
+    setPendingMainCamera(selectedMainCamera);
+    setPendingCardCamera(selectedCardCamera);
+    setIsConfigOpen(true);
+  };
+
+  // Handle dialog close
+  const handleConfigClose = () => {
+    // Reset pending selections
+    setPendingMainCamera(selectedMainCamera);
+    setPendingCardCamera(selectedCardCamera);
+    setIsConfigOpen(false);
+  };
+
+  // Update the camera selector JSX
   const renderCameraSelector = () => {
     if (cameras.length < 2) {
       return (
@@ -314,7 +381,7 @@ const App = () => {
     }
 
     return (
-      <Dialog.Root>
+      <Dialog.Root open={isConfigOpen} onOpenChange={handleConfigOpen}>
         <Dialog.Trigger>
           <Button 
             variant="soft" 
@@ -331,8 +398,8 @@ const App = () => {
             <Box>
               <Text size="4">Main Camera</Text>
               <select 
-                value={selectedMainCamera || ''} 
-                onChange={(e) => setSelectedMainCamera(e.target.value)}
+                value={pendingMainCamera || ''} 
+                onChange={(e) => setPendingMainCamera(e.target.value)}
                 style={{
                   width: '100%',
                   padding: '8px',
@@ -351,8 +418,8 @@ const App = () => {
             <Box>
               <Text size="4">Card Detection Camera</Text>
               <select 
-                value={selectedCardCamera || ''} 
-                onChange={(e) => setSelectedCardCamera(e.target.value)}
+                value={pendingCardCamera || ''} 
+                onChange={(e) => setPendingCardCamera(e.target.value)}
                 style={{
                   width: '100%',
                   padding: '8px',
@@ -369,15 +436,34 @@ const App = () => {
             </Box>
           </Flex>
 
-          <Dialog.Close>
-            <Button variant="soft" color="gray" style={{ marginTop: '20px' }}>
-              Close
+          <Flex gap="3" justify="end" style={{ marginTop: '20px' }}>
+            <Button variant="soft" color="gray" onClick={handleConfigClose}>
+              Cancel
             </Button>
-          </Dialog.Close>
+            <Button variant="solid" color="pink" onClick={handleSaveCameraConfig}>
+              Save Changes
+            </Button>
+          </Flex>
         </Dialog.Content>
       </Dialog.Root>
     );
   };
+
+  // Add handlers for camera selection
+  const handleMainCameraChange = (deviceId) => {
+    setSelectedMainCamera(deviceId);
+    localStorage.setItem('selectedMainCamera', deviceId);
+  };
+
+  const handleCardCameraChange = (deviceId) => {
+    setSelectedCardCamera(deviceId);
+    localStorage.setItem('selectedCardCamera', deviceId);
+  };
+
+  // Add useEffect to monitor debugInfo changes
+  useEffect(() => {
+    console.log('Debug Info Updated:', debugInfo);
+  }, [debugInfo]);
 
   return (
     <Box className="h-screen flex flex-col overflow-hidden" style={getAppStyles()}>
@@ -559,9 +645,8 @@ const App = () => {
                 ref={webcamRef}
                 audio={false}
                 videoConstraints={{
-                  width: 600,
-                  height: 450,
-                  facingMode: "environment"
+                  ...videoConstraints,
+                  deviceId: selectedMainCamera ? { exact: selectedMainCamera } : undefined
                 }}
                 width={600}
                 height={450}
@@ -608,10 +693,136 @@ const App = () => {
         </div>
       </div>
 
-      {/* Centered Popup Notification using Flex */}
-      {showNotification && (
-        <div 
+      {/* Debug Panel Toggle Button */}
+      <Button
+          variant="soft"
+          color="gray"
+          onClick={() => setShowDebugPanel(!showDebugPanel)}
           style={{
+              position: 'fixed',
+              left: '20px',
+              bottom: '20px',
+              zIndex: 9999
+          }}
+      >
+          {showDebugPanel ? 'Hide Debug Info' : 'Show Debug Info'}
+      </Button>
+
+      {/* Debug Panel */}
+      {debugInfo && showDebugPanel && (
+        <div style={{
+            position: 'fixed',
+            right: '20px',
+            top: '80px',
+            backgroundColor: 'rgba(0, 0, 0, 0.9)',
+            color: 'white',
+            padding: '15px',
+            borderRadius: '8px',
+            width: '500px',
+            height: '70vh',
+            overflowY: 'auto',
+            zIndex: 9999,
+            boxShadow: '0 0 10px rgba(0,0,0,0.5)',
+            border: '1px solid rgba(255,255,255,0.1)'
+        }}>
+            <div style={{ 
+                display: 'flex', 
+                justifyContent: 'space-between', 
+                alignItems: 'flex-start',
+                marginBottom: '10px',
+                borderBottom: '1px solid rgba(255,255,255,0.2)',
+                paddingBottom: '8px',
+                flexDirection: 'column'
+            }}>
+                <h3 style={{ margin: '0 0 8px 0', fontSize: '16px' }}>Card Detection Debug</h3>
+                
+                {/* Debug Images */}
+                {debugInfo.originalImage && (
+                    <div style={{ marginBottom: '10px', width: '100%' }}>
+                        <h4 style={{ fontSize: '14px', marginBottom: '5px' }}>Original Capture</h4>
+                        <img 
+                            src={debugInfo.originalImage}
+                            alt="Original capture"
+                            style={{ 
+                                width: '300px',
+                                marginBottom: '8px',
+                                borderRadius: '4px'
+                            }}
+                        />
+                    </div>
+                )}
+
+                {/* Color Masks */}
+                {debugInfo.colorMasks && Object.entries(debugInfo.colorMasks).map(([color, maskUrl]) => (
+                    <div key={color} style={{ marginBottom: '10px', width: '100%' }}>
+                        <h4 style={{ fontSize: '14px', marginBottom: '5px', textTransform: 'capitalize' }}>
+                            {color} Detection Mask
+                        </h4>
+                        <img 
+                            src={maskUrl}
+                            alt={`${color} mask`}
+                            style={{ 
+                                width: '300px',
+                                marginBottom: '8px',
+                                borderRadius: '4px'
+                            }}
+                        />
+                    </div>
+                ))}
+
+                {/* Detection Results */}
+                <div style={{ width: '100%', marginBottom: '10px' }}>
+                    <h4 style={{ fontSize: '14px', marginBottom: '5px' }}>Detection Results</h4>
+                    {debugInfo.detectedColors && debugInfo.detectedColors.map(({ color, numBoxes, areas }) => (
+                        <div key={color} style={{
+                            padding: '8px',
+                            marginBottom: '8px',
+                            backgroundColor: 'rgba(255,255,255,0.1)',
+                            borderRadius: '4px'
+                        }}>
+                            <p style={{ 
+                                textTransform: 'capitalize', 
+                                fontWeight: 'bold',
+                                color: color === debugInfo.dominantColor ? '#00ff00' : 'white'
+                            }}>
+                                {color} {color === debugInfo.dominantColor && '(Dominant)'}
+                            </p>
+                            <p>Boxes: {numBoxes}</p>
+                            <p>Areas: {areas.map(area => Math.round(area)).join(', ')} pixels²</p>
+                        </div>
+                    ))}
+                    <p>Detection Time: {debugInfo.detectionTime.toFixed(2)}ms</p>
+                </div>
+
+                {/* Raw Debug Data */}
+                <div style={{ width: '100%' }}>
+                    <h4 style={{ fontSize: '14px', marginBottom: '5px' }}>Raw Debug Data</h4>
+                    <pre style={{ 
+                        fontSize: '12px', 
+                        whiteSpace: 'pre-wrap',
+                        backgroundColor: 'rgba(0,0,0,0.3)',
+                        padding: '10px',
+                        borderRadius: '4px',
+                        maxHeight: '200px',
+                        overflowY: 'auto'
+                    }}>
+                        {JSON.stringify({
+                            ...debugInfo,
+                            originalImage: '[Image Data]',
+                            colorMasks: Object.keys(debugInfo.colorMasks || {}).reduce((acc, key) => ({
+                                ...acc,
+                                [key]: '[Mask Data]'
+                            }), {})
+                        }, null, 2)}
+                    </pre>
+                </div>
+            </div>
+        </div>
+      )}
+
+      {/* Centered Popup Notification */}
+      {showNotification && (
+        <div style={{
             position: 'fixed',
             top: 0,
             left: 0,
@@ -622,53 +833,44 @@ const App = () => {
             alignItems: 'center',
             zIndex: 1000,
             backgroundColor: 'rgba(0, 0, 0, 0.1)'
-          }}
-        >
+        }}>
           <Box 
-            role="alert"
-            aria-live="polite"
-            style={{
-              backgroundColor: settings.darkTheme ? '#2d2d2d' : '#ffffff',
-              color: settings.darkTheme ? '#ffffff' : '#000000',
-              fontSize: '2rem',
-              padding: '20px 40px',
-              borderRadius: '12px',
-              boxShadow: '0 4px 20px rgba(0, 0, 0, 0.15)',
-              animation: 'fadeInScale 0.3s ease-out',
-              position: 'relative'
-            }}
-          >
-            <button
-              onClick={() => setShowNotification(false)}
+              role="alert"
+              aria-live="polite"
               style={{
-                position: 'absolute',
-                top: '10px',
-                right: '10px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                padding: '5px',
-                color: settings.darkTheme ? '#ffffff80' : '#00000080',
-                transition: 'color 0.2s ease'
+                  backgroundColor: settings.darkTheme ? '#2d2d2d' : '#ffffff',
+                  color: settings.darkTheme ? '#ffffff' : '#000000',
+                  padding: '30px 50px',
+                  borderRadius: '12px',
+                  boxShadow: '0 4px 20px rgba(0, 0, 0, 0.15)',
+                  animation: 'fadeInScale 0.3s ease-out',
+                  position: 'relative',
+                  minWidth: '400px'
               }}
-              onMouseOver={(e) => e.currentTarget.style.color = settings.darkTheme ? '#ffffff' : '#000000'}
-              onMouseOut={(e) => e.currentTarget.style.color = settings.darkTheme ? '#ffffff80' : '#00000080'}
-              aria-label="Close notification"
-            >
-              <FaTimes size={24} />
-            </button>
+          >
+              <button
+                  onClick={() => setShowNotification(false)}
+                  style={{
+                      position: 'absolute',
+                      top: '15px',
+                      right: '15px',
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      padding: '5px',
+                      color: settings.darkTheme ? '#ffffff80' : '#00000080'
+                  }}
+              >
+                  <FaTimes size={24} />
+              </button>
 
-            <div style={{
-              minWidth: '300px',
-              textAlign: 'center'
-            }}>
               <Text style={{ 
-                fontSize: '2rem',
-                fontWeight: '500'
+                  fontSize: '2.5rem',  // Increased from 2rem
+                  fontWeight: '600',   // Increased from 500
+                  textAlign: 'center'
               }}>
-                {notificationMessage}
+                  {notificationMessage}
               </Text>
-            </div>
           </Box>
         </div>
       )}
