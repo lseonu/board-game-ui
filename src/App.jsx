@@ -1,6 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { FaCog, FaTimes } from "react-icons/fa";
-import Webcam from "react-webcam";
 import {
   Container,
   Heading,
@@ -13,8 +12,8 @@ import {
   Switch,
   Slider,
 } from "@radix-ui/themes";
-import { detectCard, initializeDetection, listCameras, getDebugData } from './cardDetection';
-import { controlCardReader } from './cardReader';
+import { useWebSocket } from './hooks/useWebSocket';
+import GameBoard from './components/GameBoard';
 
 const App = () => {
   const [showNotification, setShowNotification] = useState(false);
@@ -27,39 +26,16 @@ const App = () => {
     fontSize: 80,  // Changed default to 80%
     colorblindMode: 'none' // none, protanopia, deuteranopia, tritanopia
   });
-  
-  const webcamRef = useRef(null);
-  const [isWebcamActive, setIsWebcamActive] = useState(true);
-  const [isReading, setIsReading] = useState(false);
-  const [detectedCard, setDetectedCard] = useState(null);
-  const [cameras, setCameras] = useState([]);
-  const [selectedMainCamera, setSelectedMainCamera] = useState(() => {
-    return localStorage.getItem('selectedMainCamera') || null;
-  });
-  const [selectedCardCamera, setSelectedCardCamera] = useState(() => {
-    return localStorage.getItem('selectedCardCamera') || null;
-  });
-  const [isCameraSetupComplete, setIsCameraSetupComplete] = useState(false);
 
-  // Add state for pending camera selections
-  const [pendingMainCamera, setPendingMainCamera] = useState(selectedMainCamera);
-  const [pendingCardCamera, setPendingCardCamera] = useState(selectedCardCamera);
-
-  // Add state for dialog visibility
-  const [isConfigOpen, setIsConfigOpen] = useState(false);
-
-  // Add state for webcam constraints
-  const [videoConstraints, setVideoConstraints] = useState({
-    width: 1280,
-    height: 720,
-    facingMode: "environment"
-  });
-
-  // Add debug state
-  const [debugInfo, setDebugInfo] = useState(null);
-
-  // Add state for debug panel visibility
-  const [showDebugPanel, setShowDebugPanel] = useState(true);
+  const {
+    isConnected,
+    gameState,
+    isAligning,
+    alignmentFrame,
+    drawnCard,
+    pathToTarget,
+    movePrompt
+  } = useWebSocket();
 
   const handleNotification = useCallback((message) => {
     setNotificationMessage(message);
@@ -67,90 +43,12 @@ const App = () => {
     setTimeout(() => setShowNotification(false), 10000);
   }, []);
 
-  const handleDrawCard = async () => {
-    try {
-      setIsReading(true);
-      console.log('Starting card draw process...'); // Debug log
-      
-      await controlCardReader.connect();
-      await controlCardReader.drawCard();
-      
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      if (!isCameraSetupComplete) {
-        throw new Error('Cameras not properly configured');
-      }
-      const cardInfo = await detectCard();
-      
-      // Update debug info and log it
-      const debugData = getDebugData();
-      console.log('Debug Data:', debugData); // Make sure this shows data
-      setDebugInfo(debugData);
-      
-      setDetectedCard(cardInfo);
-      setNotificationMessage(`Drew card: ${cardInfo.name}`);
-      setShowNotification(true);
-
-    } catch (error) {
-      console.error('Error drawing card:', error);
-      setNotificationMessage('Error drawing card: ' + error.message);
-      setShowNotification(true);
-      setDebugInfo({ error: error.message });
-    } finally {
-      setIsReading(false);
-    }
-  };
-
-  const handleMove = useCallback(() => {
-    handleNotification("Piece moved!");
-  }, [handleNotification]);
-
   const handleSettingChange = (setting, value) => {
     setSettings(prev => ({
       ...prev,
       [setting]: value
     }));
   };
-
-  // Initialize cameras on component mount
-  useEffect(() => {
-    const setupCameras = async () => {
-      try {
-        const availableCameras = await listCameras();
-        setCameras(availableCameras);
-        
-        // Only auto-select if no cameras are already selected in localStorage
-        if (availableCameras.length >= 2 && !selectedMainCamera && !selectedCardCamera) {
-          handleMainCameraChange(availableCameras[0].deviceId);
-          handleCardCameraChange(availableCameras[1].deviceId);
-        }
-      } catch (error) {
-        console.error('Error listing cameras:', error);
-        setNotificationMessage('Error setting up cameras');
-        setShowNotification(true);
-      }
-    };
-
-    setupCameras();
-  }, []);
-
-  // Initialize detection when cameras are selected
-  useEffect(() => {
-    const initDetection = async () => {
-      if (selectedMainCamera && selectedCardCamera) {
-        try {
-          await initializeDetection(selectedMainCamera, selectedCardCamera);
-          setIsCameraSetupComplete(true);
-        } catch (error) {
-          console.error('Error initializing detection:', error);
-          setNotificationMessage('Error initializing cameras');
-          setShowNotification(true);
-        }
-      }
-    };
-
-    initDetection();
-  }, [selectedMainCamera, selectedCardCamera]);
 
   // Apply dark theme
   useEffect(() => {
@@ -298,172 +196,6 @@ const App = () => {
       color: '#ffffff',  // Always white text for normal vision
     };
   };
-
-  // Update the handleSaveCameraConfig function
-  const handleSaveCameraConfig = async () => {
-    // Save the pending selections
-    setSelectedMainCamera(pendingMainCamera);
-    setSelectedCardCamera(pendingCardCamera);
-    
-    localStorage.setItem('selectedMainCamera', pendingMainCamera);
-    localStorage.setItem('selectedCardCamera', pendingCardCamera);
-
-    // Update video constraints for the main camera
-    setVideoConstraints(prev => ({
-      ...prev,
-      deviceId: pendingMainCamera ? { exact: pendingMainCamera } : undefined
-    }));
-
-    // Reinitialize detection with new cameras
-    try {
-      await initializeDetection(pendingMainCamera, pendingCardCamera);
-      
-      // Force webcam refresh by briefly toggling it off and on
-      setIsWebcamActive(false);
-      await new Promise(resolve => setTimeout(resolve, 100));
-      setIsWebcamActive(true);
-      
-      setNotificationMessage('Camera configuration saved successfully');
-      setShowNotification(true);
-    } catch (error) {
-      console.error('Error initializing cameras:', error);
-      setNotificationMessage('Error setting up cameras');
-      setShowNotification(true);
-    }
-
-    setIsConfigOpen(false);
-  };
-
-  // Handle dialog open
-  const handleConfigOpen = () => {
-    // Reset pending selections to current values
-    setPendingMainCamera(selectedMainCamera);
-    setPendingCardCamera(selectedCardCamera);
-    setIsConfigOpen(true);
-  };
-
-  // Handle dialog close
-  const handleConfigClose = () => {
-    // Reset pending selections
-    setPendingMainCamera(selectedMainCamera);
-    setPendingCardCamera(selectedCardCamera);
-    setIsConfigOpen(false);
-  };
-
-  // Update the camera selector JSX
-  const renderCameraSelector = () => {
-    if (cameras.length < 2) {
-      return (
-        <div style={{ 
-          position: 'fixed', 
-          top: '50%', 
-          left: '50%', 
-          transform: 'translate(-50%, -50%)',
-          backgroundColor: settings.darkTheme ? '#2d2d2d' : '#ffffff',
-          padding: '32px 48px',
-          borderRadius: '12px',
-          boxShadow: '0 4px 20px rgba(0, 0, 0, 0.15)',
-          zIndex: 1000,
-          textAlign: 'center',
-          maxWidth: '80%',
-          width: '400px'
-        }}>
-          <Text size="8" style={{ // Increased from size="5" to size="8"
-            color: '#be185d',
-            fontWeight: '500',
-            lineHeight: '1.5',
-            fontSize: '2rem' // Added explicit font size
-          }}>
-            Please connect at least two cameras to use the card detection feature.
-          </Text>
-        </div>
-      );
-    }
-
-    return (
-      <Dialog.Root open={isConfigOpen} onOpenChange={handleConfigOpen}>
-        <Dialog.Trigger>
-          <Button 
-            variant="soft" 
-            color="gray"
-            style={{ position: 'fixed', bottom: '20px', right: '20px' }}
-          >
-            Configure Cameras
-          </Button>
-        </Dialog.Trigger>
-        <Dialog.Content>
-          <Dialog.Title>Camera Configuration</Dialog.Title>
-          
-          <Flex direction="column" gap="4">
-            <Box>
-              <Text size="4">Main Camera</Text>
-              <select 
-                value={pendingMainCamera || ''} 
-                onChange={(e) => setPendingMainCamera(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '8px',
-                  marginTop: '8px'
-                }}
-              >
-                <option value="">Select main camera</option>
-                {cameras.map(camera => (
-                  <option key={camera.deviceId} value={camera.deviceId}>
-                    {camera.label || `Camera ${camera.deviceId.slice(0, 8)}`}
-                  </option>
-                ))}
-              </select>
-            </Box>
-
-            <Box>
-              <Text size="4">Card Detection Camera</Text>
-              <select 
-                value={pendingCardCamera || ''} 
-                onChange={(e) => setPendingCardCamera(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '8px',
-                  marginTop: '8px'
-                }}
-              >
-                <option value="">Select card detection camera</option>
-                {cameras.map(camera => (
-                  <option key={camera.deviceId} value={camera.deviceId}>
-                    {camera.label || `Camera ${camera.deviceId.slice(0, 8)}`}
-                  </option>
-                ))}
-              </select>
-            </Box>
-          </Flex>
-
-          <Flex gap="3" justify="end" style={{ marginTop: '20px' }}>
-            <Button variant="soft" color="gray" onClick={handleConfigClose}>
-              Cancel
-            </Button>
-            <Button variant="solid" color="pink" onClick={handleSaveCameraConfig}>
-              Save Changes
-            </Button>
-          </Flex>
-        </Dialog.Content>
-      </Dialog.Root>
-    );
-  };
-
-  // Add handlers for camera selection
-  const handleMainCameraChange = (deviceId) => {
-    setSelectedMainCamera(deviceId);
-    localStorage.setItem('selectedMainCamera', deviceId);
-  };
-
-  const handleCardCameraChange = (deviceId) => {
-    setSelectedCardCamera(deviceId);
-    localStorage.setItem('selectedCardCamera', deviceId);
-  };
-
-  // Add useEffect to monitor debugInfo changes
-  useEffect(() => {
-    console.log('Debug Info Updated:', debugInfo);
-  }, [debugInfo]);
 
   return (
     <Box className="h-screen flex flex-col overflow-hidden" style={getAppStyles()}>
@@ -618,64 +350,92 @@ const App = () => {
             </Dialog.Root>
           </div>
         </Flex>
-      </Container>
 
-      {/* Main Content */}
-      <div className="flex flex-col items-center justify-center flex-grow">
-        {/* Container with padding */}
-        <div style={{ 
-          paddingTop: '40px',
-          paddingBottom: '40px',
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center'
-        }}>
-          {/* Live Stream Section */}
-          <Box 
-            className="rounded-lg"
-            style={{
-              width: '600px',
-              height: '450px',
-              backgroundColor: settings.darkTheme ? '#2d2d2d' : '#1a1a1a',
-              border: settings.darkTheme ? '2px solid #444' : 'none'
-            }}
-          >
-            {isWebcamActive ? (
-              <Webcam
-                ref={webcamRef}
-                audio={false}
-                videoConstraints={{
-                  ...videoConstraints,
-                  deviceId: selectedMainCamera ? { exact: selectedMainCamera } : undefined
-                }}
-                width={600}
-                height={450}
-                className="rounded-lg"
+        {/* Game Status */}
+        {gameState && (
+          <Box mb="4">
+            <Text size="5" weight="bold">
+              Turn {gameState.turn_number + 1} - {gameState.current_piece}'s Turn
+            </Text>
+          </Box>
+        )}
+
+        {/* Alignment View */}
+        {isAligning && (
+          <Box className="relative">
+            <Text size="4" mb="2">Aligning corners of game board...</Text>
+            {alignmentFrame ? (
+              <img 
+                src={alignmentFrame} 
+                alt="Board alignment" 
                 style={{
                   width: '100%',
-                  height: '100%',
-                  objectFit: 'contain'
+                  height: 'auto',
+                  maxHeight: '70vh',
+                  objectFit: 'contain',
+                  border: '2px solid #ccc',
+                  borderRadius: '8px',
+                  backgroundColor: '#f0f0f0'
+                }}
+                onError={(e) => {
+                  console.error('Error loading image:', e);
+                  e.target.style.display = 'none';
                 }}
               />
             ) : (
-              <Text 
-                size="5" 
-                className={settings.darkTheme ? 'text-gray-300' : 'text-white'}
+              <Box 
+                style={{ 
+                  width: '100%',
+                  height: '50vh',
+                  backgroundColor: '#f0f0f0',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: '8px'
+                }}
               >
-                Webcam is disabled
-              </Text>
+                <Text>Waiting for camera feed...</Text>
+              </Box>
             )}
           </Box>
-        </div>
+        )}
 
-        {/* Game Controls with larger buttons */}
+        {/* Game Board View */}
+        {!isAligning && gameState && (
+          <Box className="relative">
+            <GameBoard 
+              gameState={gameState}
+              pathToTarget={pathToTarget}
+            />
+          </Box>
+        )}
+
+        {/* Card and Move Prompts */}
+        {drawnCard && (
+          <Box mt="4">
+            <Text size="4">Drew card: {drawnCard}</Text>
+          </Box>
+        )}
+
+        {movePrompt && (
+          <Box mt="4">
+            <Text size="4">{movePrompt}</Text>
+          </Box>
+        )}
+
+        {/* Game Controls */}
         <div className="mb-16">
           <Flex gap="8" justify="center" className="h-36" style={{ marginBottom: '24px' }}>
             <Button 
               size="4"
               variant="solid"
               className="px-14 h-full text-3xl font-bold w-60"
-              onClick={handleDrawCard}
+              onClick={() => {
+                // Send draw card command to server via websocket
+                if (ws && isConnected) {
+                  ws.send(JSON.stringify({ command: 'draw_card' }));
+                }
+              }}
               style={getButtonStyles('#f472b6')}
             >
               Draw Card
@@ -684,141 +444,19 @@ const App = () => {
               size="4"
               variant="solid"
               className="px-14 h-full text-3xl font-bold w-60"
-              onClick={handleMove}
+              onClick={() => {
+                // Send move command to server via websocket
+                if (ws && isConnected) {
+                  ws.send(JSON.stringify({ command: 'move' }));
+                }
+              }}
               style={getButtonStyles('#be185d')}
             >
               Move
             </Button>
           </Flex>
         </div>
-      </div>
-
-      {/* Debug Panel Toggle Button */}
-      <Button
-          variant="soft"
-          color="gray"
-          onClick={() => setShowDebugPanel(!showDebugPanel)}
-          style={{
-              position: 'fixed',
-              left: '20px',
-              bottom: '20px',
-              zIndex: 9999
-          }}
-      >
-          {showDebugPanel ? 'Hide Debug Info' : 'Show Debug Info'}
-      </Button>
-
-      {/* Debug Panel */}
-      {debugInfo && showDebugPanel && (
-        <div style={{
-            position: 'fixed',
-            right: '20px',
-            top: '80px',
-            backgroundColor: 'rgba(0, 0, 0, 0.9)',
-            color: 'white',
-            padding: '15px',
-            borderRadius: '8px',
-            width: '500px',
-            height: '70vh',
-            overflowY: 'auto',
-            zIndex: 9999,
-            boxShadow: '0 0 10px rgba(0,0,0,0.5)',
-            border: '1px solid rgba(255,255,255,0.1)'
-        }}>
-            <div style={{ 
-                display: 'flex', 
-                justifyContent: 'space-between', 
-                alignItems: 'flex-start',
-                marginBottom: '10px',
-                borderBottom: '1px solid rgba(255,255,255,0.2)',
-                paddingBottom: '8px',
-                flexDirection: 'column'
-            }}>
-                <h3 style={{ margin: '0 0 8px 0', fontSize: '16px' }}>Card Detection Debug</h3>
-                
-                {/* Debug Images */}
-                {debugInfo.originalImage && (
-                    <div style={{ marginBottom: '10px', width: '100%' }}>
-                        <h4 style={{ fontSize: '14px', marginBottom: '5px' }}>Original Capture</h4>
-                        <img 
-                            src={debugInfo.originalImage}
-                            alt="Original capture"
-                            style={{ 
-                                width: '300px',
-                                marginBottom: '8px',
-                                borderRadius: '4px'
-                            }}
-                        />
-                    </div>
-                )}
-
-                {/* Color Masks */}
-                {debugInfo.colorMasks && Object.entries(debugInfo.colorMasks).map(([color, maskUrl]) => (
-                    <div key={color} style={{ marginBottom: '10px', width: '100%' }}>
-                        <h4 style={{ fontSize: '14px', marginBottom: '5px', textTransform: 'capitalize' }}>
-                            {color} Detection Mask
-                        </h4>
-                        <img 
-                            src={maskUrl}
-                            alt={`${color} mask`}
-                            style={{ 
-                                width: '300px',
-                                marginBottom: '8px',
-                                borderRadius: '4px'
-                            }}
-                        />
-                    </div>
-                ))}
-
-                {/* Detection Results */}
-                <div style={{ width: '100%', marginBottom: '10px' }}>
-                    <h4 style={{ fontSize: '14px', marginBottom: '5px' }}>Detection Results</h4>
-                    {debugInfo.detectedColors && debugInfo.detectedColors.map(({ color, numBoxes, areas }) => (
-                        <div key={color} style={{
-                            padding: '8px',
-                            marginBottom: '8px',
-                            backgroundColor: 'rgba(255,255,255,0.1)',
-                            borderRadius: '4px'
-                        }}>
-                            <p style={{ 
-                                textTransform: 'capitalize', 
-                                fontWeight: 'bold',
-                                color: color === debugInfo.dominantColor ? '#00ff00' : 'white'
-                            }}>
-                                {color} {color === debugInfo.dominantColor && '(Dominant)'}
-                            </p>
-                            <p>Boxes: {numBoxes}</p>
-                            <p>Areas: {areas.map(area => Math.round(area)).join(', ')} pixels²</p>
-                        </div>
-                    ))}
-                    <p>Detection Time: {debugInfo.detectionTime.toFixed(2)}ms</p>
-                </div>
-
-                {/* Raw Debug Data */}
-                <div style={{ width: '100%' }}>
-                    <h4 style={{ fontSize: '14px', marginBottom: '5px' }}>Raw Debug Data</h4>
-                    <pre style={{ 
-                        fontSize: '12px', 
-                        whiteSpace: 'pre-wrap',
-                        backgroundColor: 'rgba(0,0,0,0.3)',
-                        padding: '10px',
-                        borderRadius: '4px',
-                        maxHeight: '200px',
-                        overflowY: 'auto'
-                    }}>
-                        {JSON.stringify({
-                            ...debugInfo,
-                            originalImage: '[Image Data]',
-                            colorMasks: Object.keys(debugInfo.colorMasks || {}).reduce((acc, key) => ({
-                                ...acc,
-                                [key]: '[Mask Data]'
-                            }), {})
-                        }, null, 2)}
-                    </pre>
-                </div>
-            </div>
-        </div>
-      )}
+      </Container>
 
       {/* Centered Popup Notification */}
       {showNotification && (
@@ -874,8 +512,6 @@ const App = () => {
           </Box>
         </div>
       )}
-
-      {renderCameraSelector()}
 
       <style jsx global>{`
         @keyframes fadeInScale {
